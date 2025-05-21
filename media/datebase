@@ -1,0 +1,47 @@
+#---------------------------------------------------------------------------------------------------------------#
+ezhefinka_db=> \dt
+              List of relations
+ Schema |      Name       | Type  |  Owner
+--------+-----------------+-------+----------
+ public | expenses        | table | postgres
+ public | user_categories | table | evzicka
+ public | users           | table | evzicka
+(3 rows)
+#---------------------------------------------------------------------------------------------------------------#
+ezhefinka_db=> \d expenses
+                                        Table "public.expenses"
+   Column   |            Type             | Collation | Nullable |               Default
+------------+-----------------------------+-----------+----------+--------------------------------------
+ id         | integer                     |           | not null | nextval('expenses_id_seq'::regclass)
+ user_id    | bigint                      |           | not null |
+ category   | character varying(50)       |           | not null |
+ amount     | numeric(10,2)               |           | not null |
+ currency   | character varying(3)        |           |          | 'RUB'::character varying
+ date       | date                        |           | not null |
+ time       | time without time zone      |           |          |
+ created_at | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+Indexes:
+    "expenses_pkey" PRIMARY KEY, btree (id)
+#---------------------------------------------------------------------------------------------------------------#
+ezhefinka_db=> \d user_categories
+           Table "public.user_categories"
+  Column  |  Type  | Collation | Nullable | Default
+----------+--------+-----------+----------+---------
+ user_id  | bigint |           | not null |
+ category | text   |           | not null |
+Indexes:
+    "user_categories_pkey" PRIMARY KEY, btree (user_id, category)
+#---------------------------------------------------------------------------------------------------------------#
+ezhefinka_db=> \d users
+                                 Table "public.users"
+   Column    |            Type             | Collation | Nullable |      Default
+-------------+-----------------------------+-----------+----------+-------------------
+ user_id     | bigint                      |           | not null |
+ username    | character varying(100)      |           |          |
+ first_name  | character varying(100)      |           |          |
+ last_name   | character varying(100)      |           |          |
+ join_date   | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+ last_active | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+Indexes:
+    "users_pkey" PRIMARY KEY, btree (user_id)
+#---------------------------------------------------------------------------------------------------------------#

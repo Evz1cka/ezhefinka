@@ -1,0 +1,7 @@
+keyboard = ReplyKeyboardBuilder()
+    keyboard.add(
+        types.KeyboardButton(text="За сегодня"),
+        types.KeyboardButton(text="За неделю"),
+        types.KeyboardButton(text="За месяц"),
+        types.KeyboardButton(text="Назад")
+    )
