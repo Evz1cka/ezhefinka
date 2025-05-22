@@ -76,7 +76,7 @@ async def prompt_new_category(call: CallbackQuery, state: FSMContext):
 
 @expense_router.message(ExpenseStates.waiting_for_new_category)
 async def save_new_category(message: types.Message, state: FSMContext):
-    new_cat = message.text.strip()
+    new_cat = message.text.strip().title()
     user_id = message.from_user.id
 
     if new_cat in PREDEFINED_CATEGORIES:
@@ -99,7 +99,7 @@ async def save_new_category(message: types.Message, state: FSMContext):
 
         # Проверяем, есть ли такая категория уже у пользователя
         exists = await conn.fetchval(
-            "SELECT 1 FROM user_categories WHERE user_id = $1 AND category = $2",
+            "SELECT 1 FROM user_categories WHERE user_id = $1 AND LOWER(category) = LOWER($2)",
             user_id, new_cat
         )
         if exists:
@@ -179,24 +179,34 @@ async def process_expense(message: types.Message, state: FSMContext):
         await message.answer("❌ Укажите категорию и сумму.")
         return
 
-    category = parts[0].strip()
+    category_input = parts[0].strip()
     amount_str = parts[1].replace(',', '.')
 
-    # Проверяем категорию без учёта регистра
+    # Получаем все доступные категории
     available = await get_available_categories(message.from_user.id)
-    available_lower = [cat.lower() for cat in available]
 
-    if category.lower() not in available_lower:
+    # Ищем соответствие по нижнему регистру, но сохраняем оригинальную запись
+    normalized_input = category_input.lower()
+    matched_category = None
+    for cat in available:
+        if cat.lower() == normalized_input:
+            matched_category = cat  # Сохраняем правильное написание
+            break
+
+    if matched_category is None:
         add_category_kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="➕ Добавить новую категорию", callback_data="add_category")
         ]])
         await message.answer(
-            f"❌ Категория *{escape_markdown(category)}* не найдена среди доступных\.\n"
+            f"❌ Категория *{escape_markdown(category_input)}* не найдена среди доступных\.\n"
             f"Пожалуйста, выберите из списка или добавьте новую\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=add_category_kb
         )
         return
+
+    category = matched_category  # теперь это правильный вариант категории
+
 
     try:
         amount = float(amount_str)

@@ -53,7 +53,7 @@ async def delete_expense_start(user_id: int, message: types.Message, state: FSMC
         ])
 
         await message.edit_text(
-            f"Последние записи (укажите ID для удаления):\n{expenses_list}\n\n"
+            f"Последние записи (укажите ID для удаления, если хотите удалить несколько, укажите все ID через пробел):\n{expenses_list}\n\n"
             "Нажмите кнопку ниже, чтобы отменить.",
             reply_markup=cancel_inline_kb
         )

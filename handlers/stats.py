@@ -1,4 +1,9 @@
 import os
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
+import io
+import tempfile
+
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -31,23 +36,169 @@ async def show_stats_menu(call: CallbackQuery):
         types.InlineKeyboardButton(text="🏷 По категориям", callback_data="stats_categories")
     )
     builder.row(
-        types.InlineKeyboardButton(text="📈 Графики", callback_data="stats_graphs"),
+        types.InlineKeyboardButton(text="📈 График", callback_data="stats_graphs"),
         types.InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")
     )
-    
-    await call.message.edit_text(
-        "📊 <b>Выберите тип статистики:</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=builder.as_markup()
-    )
+    try:
+        await call.message.edit_text(
+            "📊 <b>Выберите тип статистики:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=builder.as_markup()
+        )
+    except Exception:
+        # Пытаемся удалить старое сообщение
+        try:
+            await call.message.delete()
+        except Exception:
+            pass  # если удаление не удалось — игнорируем
 
-@stats_router.callback_query(F.data == "stats_categories") # Обработка кнопки "Статистика"
+        # Отправляем новое сообщение с тем же текстом и клавиатурой
+        await call.message.answer(
+            "📊 <b>Выберите тип статистики:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=builder.as_markup()
+        )
+
+@stats_router.callback_query(F.data == "stats_categories")
 async def show_stats_categories(callback: CallbackQuery):
-    await callback.answer("🚧 Эта функция пока в разработке.", show_alert=True)
+    pool = get_pool()
+    if not pool:
+        logging.error("❌ Ошибка: база данных не инициализирована! pool=None")
+        return
 
-@stats_router.callback_query(F.data == "stats_graphs") # Обработка кнопки "Статистика"
+    user_id = callback.from_user.id
+
+    try:
+        stats = await pool.fetch(
+            """
+            SELECT category, COALESCE(SUM(amount), 0) as sum
+            FROM expenses
+            WHERE user_id = $1
+            GROUP BY category
+            ORDER BY sum DESC
+            """,
+            user_id
+        )
+
+        if not stats:
+            text = "ℹ️ У вас пока нет данных для отображения статистики по категориям."
+        else:
+            text = "🏷 <b>Статистика по категориям (все время):</b>\n\n"
+            for i, row in enumerate(stats, 1):
+                text += f"{i}. {row['category']}: {row['sum']:.2f} ₽\n"
+
+        builder = InlineKeyboardBuilder()
+        builder.add(
+            InlineKeyboardButton(text="🔙 Назад", callback_data="show_stats_menu")
+        )
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=builder.as_markup()
+        )
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Ошибка при получении статистики по категориям: {e}", exc_info=True)
+        await callback.message.answer("❌ Не удалось загрузить статистику по категориям.")
+        await callback.answer()
+
+@stats_router.callback_query(F.data == "stats_graphs")
 async def show_stats_graph(call: CallbackQuery):
-    await call.answer("🚧 Эта функция пока в разработке.", show_alert=True)
+    import matplotlib.pyplot as plt
+    from matplotlib import rcParams
+    import io
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+
+    pool = get_pool()
+    if not pool:
+        logging.error("❌ Ошибка: база данных не инициализирована! pool=None")
+        return
+
+    user_id = call.from_user.id
+
+    try:
+        stats = await pool.fetch(
+            """
+            SELECT category, SUM(amount) AS total
+            FROM expenses
+            WHERE user_id = $1
+            GROUP BY category
+            ORDER BY total DESC
+            """,
+            user_id
+        )
+
+        if not stats:
+            await call.answer("ℹ️ Нет данных для построения графика.", show_alert=True)
+            return
+
+        categories_raw = [row["category"] for row in stats]
+        amounts = [float(row["total"]) for row in stats]
+        total_sum = sum(amounts)
+
+        # Формируем подписи с суммами и процентами
+        categories = [
+            f"{cat} — {amount:.2f} ₽ ({(amount/total_sum)*100:.1f}%)"
+            for cat, amount in zip(categories_raw, amounts)
+        ]
+
+        rcParams.update({
+            'font.size': 12,
+            'font.weight': 'bold'
+        })
+
+        plt.figure(figsize=(8, 8))
+
+        # Фон фигуры и осей
+        plt.gcf().set_facecolor("#b3b3b3")  # фон всей фигуры (серый)
+        plt.gca().set_facecolor('#f0f0f0')  # фон области осей (светло-серый)
+
+        wedges, texts, autotexts = plt.pie(
+            amounts,
+            labels=categories,
+            startangle=140,
+            autopct=lambda pct: f"{pct:.1f}%" if pct > 3 else "",
+            colors=plt.cm.Paired.colors,
+            wedgeprops={"edgecolor": "white"}
+        )
+
+        for text in texts:
+            text.set_fontsize(10)
+            text.set_fontweight('bold')
+
+        for autotext in autotexts:
+            autotext.set_fontsize(10)
+            autotext.set_fontweight('bold')
+
+        plt.title("Расходы по категориям (с суммами и %)", fontsize=14, fontweight='bold')
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", transparent=False)
+        buf.seek(0)
+        plt.close()
+
+        keyboard = InlineKeyboardBuilder()
+        keyboard.add(
+            InlineKeyboardButton(text="🔙 Назад", callback_data="show_stats_menu")
+        )
+        
+        try:
+            await call.message.delete()
+        except Exception:
+            pass  # если удаление не удалось — игнорируем
+
+        await call.message.answer_photo(
+            photo=types.BufferedInputFile(buf.read(), filename="stats.png"),
+            caption="📊 Круговая диаграмма расходов по категориям за месяц",
+            reply_markup=keyboard.as_markup()
+        )
+        await call.answer()
+        
+    except Exception as e:
+        logging.error(f"Ошибка при построении графика: {e}", exc_info=True)
+        await call.message.answer("❌ Не удалось построить график.")
+        await call.answer()
+
 
 @stats_router.callback_query(F.data == "stats_period") # Обработка кнопки "Статистика"
 async def show_stats(call: CallbackQuery):
