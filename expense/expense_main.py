@@ -174,113 +174,111 @@ async def process_expense(message: types.Message, state: FSMContext):
         await message.answer("❌ Внутренняя ошибка, попробуйте позже.")
         return
 
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Укажите категорию и сумму.")
-        return
+    lines = message.text.strip().split('\n')
+    success_count = 0
+    failed_entries = []
 
-    category_input = parts[0].strip()
-    amount_str = parts[1].replace(',', '.')
+    available_categories = await get_available_categories(message.from_user.id)
 
-    # Получаем все доступные категории
-    available = await get_available_categories(message.from_user.id)
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) < 2:
+            failed_entries.append((line, "Недостаточно данных"))
+            continue
 
-    # Ищем соответствие по нижнему регистру, но сохраняем оригинальную запись
-    normalized_input = category_input.lower()
-    matched_category = None
-    for cat in available:
-        if cat.lower() == normalized_input:
-            matched_category = cat  # Сохраняем правильное написание
-            break
+        category_input = parts[0].strip()
+        amount_str = parts[1].replace(',', '.')
 
-    if matched_category is None:
-        add_category_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="➕ Добавить новую категорию", callback_data="add_category")
-        ]])
-        await message.answer(
-            f"❌ Категория *{escape_markdown(category_input)}* не найдена среди доступных\.\n"
-            f"Пожалуйста, выберите из списка или добавьте новую\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=add_category_kb
-        )
-        return
+        normalized_input = category_input.lower()
+        matched_category = next((cat for cat in available_categories if cat.lower() == normalized_input), None)
 
-    category = matched_category  # теперь это правильный вариант категории
+        if not matched_category:
+            failed_entries.append((line, "Категория не найдена"))
+            continue
 
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            failed_entries.append((line, "Неверный формат суммы"))
+            continue
 
-    try:
-        amount = float(amount_str)
-    except ValueError:
-        await message.answer("❌ Неверный формат суммы. Введите число, например: 300 или 300.50")
-        return
+        # Дата и время по умолчанию
+        date_obj = datetime.utcnow().date()
+        time_obj = None
 
-    # Дата и время по умолчанию
-    date_obj = datetime.utcnow().date()
-    time_obj = None
+        try:
+            if len(parts) >= 3 and '.' in parts[2]:
+                date_parts = parts[2].split('.')
+                if len(date_parts) == 2:
+                    day, month = map(int, date_parts)
+                    year = datetime.now().year
+                elif len(date_parts) == 3:
+                    day, month, year = map(int, date_parts)
+                else:
+                    raise ValueError()
+                date_obj = datetime(year, month, day).date()
 
-    try:
-        if len(parts) >= 3 and '.' in parts[2]:
-            date_parts = parts[2].split('.')
-            if len(date_parts) == 2:
-                day, month = map(int, date_parts)
-                year = datetime.now().year
-            elif len(date_parts) == 3:
-                day, month, year = map(int, date_parts)
+            if len(parts) >= 4 and ':' in parts[3]:
+                time_obj = datetime.strptime(parts[3], '%H:%M').time()
+        except Exception:
+            failed_entries.append((line, "Неверный формат даты или времени"))
+            continue
+
+        try:
+            if time_obj:
+                await pool.execute(
+                    "INSERT INTO expenses (user_id, category, amount, date, time) VALUES ($1, $2, $3, $4, $5)",
+                    message.from_user.id, matched_category, amount, date_obj, time_obj
+                )
             else:
-                raise ValueError("Неверный формат даты")
+                await pool.execute(
+                    "INSERT INTO expenses (user_id, category, amount, date) VALUES ($1, $2, $3, $4)",
+                    message.from_user.id, matched_category, amount, date_obj
+                )
+            success_count += 1
+        except Exception:
+            failed_entries.append((line, "Ошибка при сохранении"))
 
-            date_obj = datetime(year, month, day).date()
+    # Ответ пользователю
+    response = f"✅ Добавлено расходов: {success_count}\n"
+    if failed_entries:
+        response += "\n❌ Ошибки:\n"
+        for entry, reason in failed_entries:
+            response += f"- `{escape_markdown(entry)}` — {reason}\n"
 
-        if len(parts) >= 4 and ':' in parts[3]:
-            time_obj = datetime.strptime(parts[3], '%H:%M').time()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Готово", callback_data="main_menu")]]
+    )
 
-    except Exception:
-        await message.answer("❌ Неверный формат даты или времени.\n"
-                             "Дата должна быть в формате ДД.ММ или ДД.ММ.ГГГГ.\n"
-                             "Время — в формате ЧЧ:ММ.")
-        return
+    await message.answer(response, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
 
-    # Вставка в базу
-    try:
-        # Вставка в базу
-        if time_obj is None:
-            await pool.execute(
-                "INSERT INTO expenses (user_id, category, amount, date) VALUES ($1, $2, $3, $4)",
-                message.from_user.id, category, amount, date_obj
+
+async def is_duplicate_expense(
+    user_id: int,
+    category: str,
+    amount: float,
+    date_obj: date,
+    time_obj: time | None = None
+) -> bool:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if time_obj:
+            result = await conn.fetchval(
+                """
+                SELECT 1 FROM expenses
+                WHERE user_id = $1 AND category = $2 AND amount = $3 AND date = $4 AND time = $5
+                LIMIT 1
+                """,
+                user_id, category, amount, date_obj, time_obj
             )
         else:
-            await pool.execute(
-                "INSERT INTO expenses (user_id, category, amount, date, time) VALUES ($1, $2, $3, $4, $5)",
-                message.from_user.id, category, amount, date_obj, time_obj
+            result = await conn.fetchval(
+                """
+                SELECT 1 FROM expenses
+                WHERE user_id = $1 AND category = $2 AND amount = $3 AND date = $4 AND time IS NULL
+                LIMIT 1
+                """,
+                user_id, category, amount, date_obj
             )
-    except Exception as e:
-        await message.answer("❌ Ошибка при сохранении в базу. Попробуйте позже.")
-        return
 
-    await message.answer(f"✅ Добавлено: {category} - {amount:.2f} ₽")
-
-    # Удаляем предыдущее сообщение с подсказкой, если есть
-    data = await state.get_data()
-    last_msg_id = data.get("last_hint_message_id")
-    if last_msg_id:
-        try:
-            await message.bot.delete_message(chat_id=message.chat.id, message_id=last_msg_id)
-        except Exception:
-            pass  # Если не удалось удалить — просто игнорируем
-
-    # Клавиатура для следующего действия
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="Готово", callback_data="main_menu"),
-        ]]
-    )
-
-    sent_msg = await message.answer(
-        "Добавьте ещё расходы или нажмите кнопку 'Готово'",
-        reply_markup=keyboard
-    )
-
-    # Сохраняем ID этого сообщения в FSM для будущего удаления
-    await state.update_data(last_hint_message_id=sent_msg.message_id)
-
-#endregion
+        return result is not None

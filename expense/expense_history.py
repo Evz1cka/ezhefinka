@@ -1,4 +1,5 @@
 import os
+
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -13,7 +14,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 
 )
-from datetime import datetime
+from datetime import timedelta, date, datetime
 import asyncpg  # для работы с базой данных 
 from init import logging  # твой модуль для логов
 from db.db_main import get_pool  # функция для получения пула подключения к базе
@@ -25,6 +26,115 @@ EXPENSES_PER_PAGE = 5  # Количество расходов на одной �
 
 class SearchExpenses(StatesGroup):
     waiting_for_query = State()
+class PeriodHistory(StatesGroup):
+    waiting_for_custom_period = State()
+
+@expense_history_router.callback_query(F.data == "expenses_by_period")
+async def expenses_by_period_menu(callback: CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="📅 За сегодня", callback_data="history_period_today"),
+        types.InlineKeyboardButton(text="🗓 За неделю", callback_data="history_period_week")
+    )
+    builder.row(
+        types.InlineKeyboardButton(text="📆 За месяц", callback_data="history_period_month"),
+        types.InlineKeyboardButton(text="✏️ Выбрать свой", callback_data="history_period_custom")
+    )
+    builder.row(types.InlineKeyboardButton(text="🔙 Назад", callback_data="expenses_history"))
+    
+    await callback.message.edit_text(
+        "📅 <b>Выберите период</b> для просмотра расходов:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=builder.as_markup()
+    )
+
+@expense_history_router.callback_query(F.data.startswith("history_period_"))
+async def show_period_expenses(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    today = date.today()
+    
+    if callback.data == "history_period_today":
+        start_date = end_date = today
+    elif callback.data == "history_period_week":
+        start_date = today - timedelta(days=7)
+        end_date = today
+    elif callback.data == "history_period_month":
+        start_date = today.replace(day=1)
+        end_date = today
+    elif callback.data == "history_period_custom":
+        await callback.message.edit_text(
+            "✏️ Введите диапазон в формате:\n<code>ДД.ММ.ГГГГ - ДД.ММ</code>\n\n"
+            "Пример: <code>13.11.2024 - 22.05</code>",
+            parse_mode=ParseMode.HTML
+        )
+        await callback.answer()
+        return await callback.bot.fsm.set_state(callback.from_user.id, PeriodHistory.waiting_for_custom_period)
+
+    await show_expenses_in_period(callback.message, user_id, start_date, end_date)
+    await callback.answer()
+
+@expense_history_router.message(PeriodHistory.waiting_for_custom_period)
+async def handle_custom_period(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    try:
+        parts = message.text.strip().split("-")
+        start_str = parts[0].strip()
+        end_str = parts[1].strip()
+
+        start_date = datetime.strptime(start_str, "%d.%m.%Y").date()
+        end_date = datetime.strptime(end_str + f".{start_date.year}", "%d.%m.%Y").date()
+
+        if end_date < start_date:
+            raise ValueError("Конечная дата раньше начальной.")
+
+        await show_expenses_in_period(message, user_id, start_date, end_date)
+        await state.clear()
+
+    except Exception as e:
+        logging.warning(f"Ошибка при парсинге периода: {e}")
+        await message.answer("❌ Неверный формат. Введите, например:\n<code>13.11.2024 - 22.05</code>",
+                             parse_mode=ParseMode.HTML)
+
+
+async def show_expenses_in_period(message: types.Message, user_id: int, start_date: date, end_date: date):
+    pool = get_pool()
+    try:
+        expenses = await pool.fetch(
+            "SELECT id, category, amount, date, time FROM expenses "
+            "WHERE user_id = $1 AND date BETWEEN $2 AND $3 "
+            "ORDER BY date DESC, (time IS NULL), time DESC, created_at DESC",
+            user_id, start_date, end_date
+        )
+
+        if not expenses:
+            await message.answer("📭 За этот период нет записей о расходах.")
+            return
+
+        text = (
+            f"📅 <b>Расходы с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}</b>\n"
+            f"📊 Всего: <b>{len(expenses)}</b>\n\n"
+        )
+
+        for i, expense in enumerate(expenses, 1):
+            date_str = expense['date'].strftime('%d.%m.%Y')
+            time_str = f" {expense['time'].strftime('%H:%M')}" if expense['time'] else ""
+            text += (
+                f"<b>#{i}</b> | 🆔 <code>{expense['id']}</code>\n"
+                f"📅 <b>{date_str}{time_str}</b>\n"
+                f"🏷 {expense['category']}: <b>{expense['amount']:.2f} ₽</b>\n\n"
+            )
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔙 Назад", callback_data="expenses_by_period")
+        builder.button(text="🏠 В меню", callback_data="main_menu")
+        builder.adjust(2)
+
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+    
+    except Exception as e:
+        logging.error(f"Ошибка показа расходов за период: {e}")
+        await message.answer("❌ Не удалось загрузить данные.")
+
 
 @expense_history_router.callback_query(F.data == "expenses_history")
 async def expenses_history_menu(call: CallbackQuery):
@@ -32,12 +142,16 @@ async def expenses_history_menu(call: CallbackQuery):
     builder.row(
         types.InlineKeyboardButton(text="📅 Последние", callback_data="expenses_recent"),
         types.InlineKeyboardButton(text="🔍 Поиск", callback_data="expenses_search")
-    )
+    ) 
+
     builder.row(
         types.InlineKeyboardButton(text="🗂 По категориям", callback_data="expenses_by_category"),
-        types.InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")
+        types.InlineKeyboardButton(text="📆 По периоду", callback_data="expenses_by_period"),
     )
     
+    builder.row(
+        types.InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu") 
+    )
     await call.message.edit_text(
         "📝 <b>История расходов</b>\nВыберите способ просмотра:",
         parse_mode=ParseMode.HTML,
