@@ -1,25 +1,35 @@
 
-import os
 from aiogram import F, types, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import (
-    Message,
     CallbackQuery,
     ReplyKeyboardRemove,
 
 )
 import asyncpg
-from datetime import datetime, date, time, timedelta
+from datetime import timedelta
 
-from users.user import get_or_create_user
-
+from db.db_main import get_pool
 start_router = Router()
+
+@start_router.message(Command("testdate"))
+async def test_date(message: types.Message):
+    pool = get_pool()
+    try:
+        await message.answer("Переключаюсь на inline-кнопки", reply_markup=ReplyKeyboardRemove())
+        current = await pool.fetchval("SELECT CURRENT_DATE")
+        week_ago = current - timedelta(days=7)
+        month_start = current.replace(day=1)
+        await message.answer(
+            f"Текущая дата в БД: {current}\n"
+            f"Неделю назад: {week_ago}\n"
+            f"Начало месяца: {month_start}"
+        )
+    except asyncpg.exceptions.UndefinedFunctionError as e:
+        await message.answer(f"Ошибка: {e}")
 
 
 @start_router.message(Command("start"))
@@ -76,6 +86,7 @@ async def start(message: types.Message, state: FSMContext):
         "• Управлять историей ваших расходов\n\n"
         "Выберите действие:"
         )
+    
     try:
         await message.edit_text(
             text,
@@ -95,19 +106,20 @@ async def show_help(call: CallbackQuery):
     help_text = (
         "ℹ️ <b>Справка по использованию бота</b>\n\n"
         "<b>Добавление расходов:</b>\n"
-        "Формат: <code>Категория Сумма [Дата] [Время]</code>\n"
-        "Примеры:\n"
-        "<code>Такси 350</code>\n"
-        "<code>Еда 500 15.07</code>\n"
-        "<code>Кино 800 15.07 20:30</code>\n\n"
+        "Формат: <code>Категория Сумма Дата Время</code>\n"
+        "Можно добавлять сразу несколько расходов, один расход на строку."
+        "Пример:\n"
+        "<code>Транспорт 100</code>\n"
+        "<code>Продукты 200,20 15.07</code>\n"
+        "<code>Кино 300.30 15.07.2025 20:30</code>\n\n"
         "<b>Статистика:</b>\n"
         "• Просмотр за разные периоды\n"
         "• Анализ по категориям\n"
         "• Графики расходов\n\n"
         "<b>История:</b>\n"
-        "• Поиск по дате/категории\n"
-        "• Редактирование записей\n"
-        "• Экспорт данных\n"
+        "• Поиск по дате/категории/цене\n"
+        "• Редактирование записей (пока не реализовано)\n"
+        "• Экспорт данных (пока не реализовано)\n"
     )
     
     builder = InlineKeyboardBuilder()
@@ -146,3 +158,4 @@ async def back_to_main_menu(call: CallbackQuery, state: FSMContext):
         pass
     await start(call.message, state)
     await call.answer()
+    

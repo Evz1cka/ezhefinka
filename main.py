@@ -5,24 +5,28 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.types import Message, CallbackQuery, Update
+from aiogram.types import Update
 from typing import Callable, Awaitable, Dict, Any
 
 from init import BOT_TOKEN, logging
 from db.db_main import create_table, init_db_pool, close_db, get_pool
 
-from users.user import get_or_create_user, user_router
+from log import start_log_cleanup_cycle, logs_router, init_logging
+from users.user import user_router
 from handlers.start import start_router
 from handlers.stats import stats_router
 from expense.expense_main import expense_router
 from expense.expense_delete import expense_delete_router
 from expense.expense_history import expense_history_router
+from expense.category import category_router
 
 # Инициализация бота
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-all_routers = [start_router, stats_router, expense_router, user_router, expense_delete_router, expense_history_router  ]
+logger = init_logging()
+
+all_routers = [start_router, stats_router, expense_router, user_router, expense_delete_router, expense_history_router, category_router, logs_router]
 
 class UserActivityMiddleware(BaseMiddleware):
     async def __call__(
@@ -55,7 +59,7 @@ class UserActivityMiddleware(BaseMiddleware):
                 "SELECT 1 FROM users WHERE user_id = $1",
                 user.id
             )
-
+            
             if not exists:
                 await db_pool.execute(
                     "INSERT INTO users (user_id, username, first_name, last_name) "
@@ -83,6 +87,7 @@ dp.update.middleware(UserActivityMiddleware())
 async def main():
     """Основная функция запуска бота""" 
     logging.info("🔄 Запуск бота...")
+    asyncio.create_task(start_log_cleanup_cycle())
     # Подключаем роутеры
     for router in all_routers:
         dp.include_router(router)
@@ -123,4 +128,3 @@ if __name__ == '__main__':
     import asyncio
     asyncio.run(main())
 #endregion
-

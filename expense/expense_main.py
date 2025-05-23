@@ -1,151 +1,56 @@
-import os
 import re
 
-from aiogram import Bot, Dispatcher, types, F, Router
+from aiogram import types, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    ReplyKeyboardRemove,
-
-)
-import asyncpg
-from datetime import datetime, date, time, timedelta
-
+from aiogram.types import CallbackQuery
+from datetime import datetime, date, time
+from expense.category import get_available_categories, PREDEFINED_CATEGORIES
 from init import logging, ADMIN_ID
 from db.db_main import get_pool
 
 expense_router = Router()
 
 # Предустановленные категории (доступны всем)
-PREDEFINED_CATEGORIES = [
-    "Продукты", "Жильё", "Связь и интернет", "Транспорт", "Здоровье",
-    "Одежда и обувь", "Красота и уход", "Развлечения", "Образование",
-    "Дом/ремонт", "Путешествия", "Подарки и праздники", "Неожиданные траты"
-]
-
-MAX_CUSTOM_CATEGORIES = 5  # лимит пользовательских категорий
 
 def escape_markdown(text: str) -> str:
-    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
+    return re.sub(r'([_\*\[\]()~`>#+=\-|{}.!\\])', r'\\\1', text)
 
 class ExpenseStates(StatesGroup):
     waiting_for_expense_input = State()  # Состояние для ввода расхода
     waiting_for_history_count = State()  # Состояние для истории расходов
     waiting_for_amount = State() # Состояние для ввода суммы
-    waiting_for_new_category = State()  # ← новое состояние
-    
-async def get_available_categories(user_id: int) -> list[str]:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        # Получаем пользовательские категории из user_categories
-        user_custom = await conn.fetch(
-            "SELECT category FROM user_categories WHERE user_id = $1",
-            user_id
-        )
-        custom = [r['category'] for r in user_custom]
 
-        if user_id == ADMIN_ID:
-            # У администратора сначала кастомные, потом предустановленные
-            return custom + PREDEFINED_CATEGORIES
-        else:
-            # У обычных — сначала предустановленные, потом кастомные
-            return PREDEFINED_CATEGORIES + custom
-
-async def get_user_categories(user_id: int):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT DISTINCT category FROM expenses WHERE user_id = $1",
-            user_id
-        )
-        return [row["category"] for row in rows]
-
-@expense_router.callback_query(F.data == "add_category")
-async def prompt_new_category(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await call.message.edit_text("Введите название новой категории:")
-    await state.set_state(ExpenseStates.waiting_for_new_category)
-
-@expense_router.message(ExpenseStates.waiting_for_new_category)
-async def save_new_category(message: types.Message, state: FSMContext):
-    new_cat = message.text.strip().title()
-    user_id = message.from_user.id
-
-    if new_cat in PREDEFINED_CATEGORIES:
-        await message.answer("❌ Эта категория уже есть в стандартном списке.")
-        await state.clear()
-        return
-
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        # Проверяем, сколько у пользователя кастомных категорий
-        count_custom = await conn.fetchval(
-            "SELECT COUNT(*) FROM user_categories WHERE user_id = $1",
-            user_id
-        )
-
-        if user_id != ADMIN_ID and count_custom >= MAX_CUSTOM_CATEGORIES:
-            await message.answer("❌ Вы достигли лимита из 5 пользовательских категорий.")
-            await state.clear()
-            return
-
-        # Проверяем, есть ли такая категория уже у пользователя
-        exists = await conn.fetchval(
-            "SELECT 1 FROM user_categories WHERE user_id = $1 AND LOWER(category) = LOWER($2)",
-            user_id, new_cat
-        )
-        if exists:
-            await message.answer("❌ Такая категория уже существует.")
-            await state.clear()
-            return
-
-        # Добавляем новую категорию в user_categories
-        await conn.execute(
-            "INSERT INTO user_categories (user_id, category) VALUES ($1, $2)",
-            user_id, new_cat
-        )
-    # Клавиатура с кнопкой "Добавить расходы"
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Добавить расходы", callback_data="add_expense")
-            ]
-        ]
-    )
-    await message.answer(f"✅ Категория «{new_cat}» добавлена! Теперь вы можете использовать её.", reply_markup=keyboard)
-    await state.clear()
-
+#endregion
+#region Добавление расходов
 @expense_router.callback_query(F.data == "add_expense")
 async def add_expense_callback(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await send_expense_input_prompt(call.from_user.id, call.message.edit_text, state)
 
-
 async def send_expense_input_prompt(user_id: int, send_func, state: FSMContext):
     all_categories = await get_available_categories(user_id)
     custom_categories = [cat for cat in all_categories if cat not in PREDEFINED_CATEGORIES]
 
+    # Основной текст с правильным экранированием
     text = (
         "Введите расход в формате:\n"
-        "*категория* *сумма* [дата] [время]\n"
+        "`категория сумма дата время`\n"
+        "Можно добавлять сразу несколько расходов, один расход на строку\\.\n"
         "Пример:\n"
-        "`Такси 300`\n"
-        "`Еда 500 20.05`\n"
-        "`Кино 800 20.05 19:30`\n\n"
+        "`Транспорт 100`\n"
+        "`Продукты 200\\,20 15\\.07`\n"
+        "`Кино 300\\.30 15\\.07\\.2025 20:30`\n\n"
         "*Доступные категории:*"
     )
 
+    # Формируем список категорий с правильным экранированием
     lines = []
     for cat in PREDEFINED_CATEGORIES:
-        lines.append(f"• {escape_markdown(cat)}")  # без version=2
+        lines.append(f"• {escape_markdown(cat)}")
 
     if custom_categories:
         lines.append("\n*Ваши категории:*")
@@ -153,6 +58,9 @@ async def send_expense_input_prompt(user_id: int, send_func, state: FSMContext):
             lines.append(f"• {escape_markdown(cat)}")
 
     category_block = "\n".join(lines)
+    
+    # Комбинируем текст и категории
+    full_text = f"{text}\n{category_block}"
 
     builder = InlineKeyboardBuilder()
     builder.row_width = 1
@@ -160,13 +68,15 @@ async def send_expense_input_prompt(user_id: int, send_func, state: FSMContext):
     keyboard = builder.as_markup()
 
     await send_func(
-        f"{text}\n{category_block}",
+        full_text,
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=keyboard
     )
 
     await state.set_state(ExpenseStates.waiting_for_expense_input)
+#endregion
 
+#region Обработка ввода расходов
 @expense_router.message(ExpenseStates.waiting_for_expense_input)
 async def process_expense(message: types.Message, state: FSMContext):
     pool = get_pool()
@@ -244,15 +154,18 @@ async def process_expense(message: types.Message, state: FSMContext):
     if failed_entries:
         response += "\n❌ Ошибки:\n"
         for entry, reason in failed_entries:
-            response += f"- `{escape_markdown(entry)}` — {reason}\n"
+            # Экранируем каждый элемент отдельно
+            escaped_entry = escape_markdown(entry)
+            escaped_reason = escape_markdown(reason)
+            response += f"\\- `{escaped_entry}` \\- {escaped_reason}\n"
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Готово", callback_data="main_menu")]]
     )
 
     await message.answer(response, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
-
-
+#endregion
+#region Проверка на дубликаты
 async def is_duplicate_expense(
     user_id: int,
     category: str,
@@ -282,3 +195,5 @@ async def is_duplicate_expense(
             )
 
         return result is not None
+#endregion
+
